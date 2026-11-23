@@ -73,6 +73,7 @@ cc_test {
     vendor: true,
     require_root: true,
     srcs: [
+        "aidl/tests/AdpfDiagTest.cpp",
         "aidl/tests/BackgroundWorkerTest.cpp",
         "aidl/tests/GpuCapacityCalculationTest.cpp",
         "aidl/tests/GpuCapacityNodeTest.cpp",
@@ -85,6 +86,7 @@ cc_test {
         "aidl/tests/UClampVoterTest.cpp",
         "aidl/tests/ChannelGroupTest.cpp",
         "aidl/tests/ChannelManagerTest.cpp",
+        "aidl/AdpfDiag.cpp",
         "aidl/BackgroundWorker.cpp",
         "aidl/ChannelGroup.cpp",
         "aidl/ChannelManager.cpp",
@@ -163,6 +165,7 @@ cc_binary {
         "powerhal_flags-aconfig-cc",
     ],
     srcs: [
+        "aidl/AdpfDiag.cpp",
         "aidl/BackgroundWorker.cpp",
         "aidl/ChannelGroup.cpp",
         "aidl/ChannelManager.cpp",

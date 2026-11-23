@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string_view>
 
 #include "AdpfTypes.h"
 #include "ChannelManager.h"
@@ -244,7 +245,13 @@ constexpr const char *boolToString(bool b) {
     return b ? "true" : "false";
 }
 
-binder_status_t Power::dump(int fd, const char **, uint32_t) {
+binder_status_t Power::dump(int fd, const char **args, uint32_t numArgs) {
+    if (numArgs >= 1 && args != nullptr && args[0] != nullptr &&
+        std::string_view(args[0]) == "adpfdiag") {
+        PowerSessionManager<>::getInstance()->adpfDiag().handleDumpCommand(fd, args + 1,
+                                                                          numArgs - 1);
+        return STATUS_OK;
+    }
     std::string buf(::android::base::StringPrintf(
             "HintManager Running: %s\n"
             "VRMode: %s\n"
