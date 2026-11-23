@@ -112,8 +112,6 @@ void SessionRecords::addReportedDurations(const std::vector<WorkDuration> &actua
             mAddedFramesForFPSCheck = 0;
         }
 
-        // The comparison and the classification record it feeds share these two
-        // locals, so the record cannot disagree with the decision.
         const double effectiveThresholdUs = (targetDurationNs / 1000) * kJankCheckTimeFactor;
         bool cycleMissed = totalDurationUs > effectiveThresholdUs;
         if (diagContext != nullptr) {

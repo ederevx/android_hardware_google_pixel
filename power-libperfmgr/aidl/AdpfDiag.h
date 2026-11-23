@@ -180,14 +180,18 @@ struct AdpfDiagLifecycle {
 class AdpfDiag {
   public:
     static constexpr uint32_t kSchemaVersion = 1;
+    // The consumer reads windows of at most this many records, so the ring holds
+    // one window's worth and reports anything older as OVERWRITTEN.
     static constexpr uint64_t kRingCapacity = 65536;
     static constexpr uint16_t kNoId = 0;
     static constexpr uint16_t kIdOverflow = 0xFFFF;
+    // Sized for every tag and profile name a device interning table can hold.
     static constexpr size_t kMaxNames = 1024;
     static constexpr size_t kMaxClosedWindows = 16;
     static constexpr size_t kReadChunk = 4096;
 
     struct Sources {
+        // Fixed by the kernel: the boot id file and the process stat format.
         const char *bootIdPath = "/proc/sys/kernel/random/boot_id";
         const char *statPath = "/proc/self/stat";
         bool allocateRing = true;
@@ -198,8 +202,7 @@ class AdpfDiag {
     AdpfDiag(const AdpfDiag &) = delete;
     AdpfDiag &operator=(const AdpfDiag &) = delete;
 
-    // Interns a process tag, session tag or profile name. Names are interned by
-    // the session that holds them, outside this component's mutex.
+    // Interns a process tag, session tag or profile name.
     uint16_t internName(const std::string &name);
 
     void appendDecision(const AdpfDiagDecisionContext &context, uint32_t itemIndex,

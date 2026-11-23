@@ -320,8 +320,6 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::resume(
     }
     mPSManager->setThreadsFromPowerSession(mSessionId, mDescriptor->thread_ids);
     mDescriptor->is_active.store(true);
-    // A resumed session runs under a new generation, so pre-pause and post-resume
-    // reports are not mistaken for one continuous report sequence.
     ++mDiagGeneration;
     diagLifecycle(DiagEvent::kResume, DiagOrigin::kClient, DiagReason::kNone, DiagState::kPaused,
                   DiagState::kActive);
@@ -371,6 +369,15 @@ DiagState PowerHintSession<HintManagerT, PowerSessionManagerT>::diagStateLocked(
         return DiagState::kClosed;
     }
     return mDescriptor->is_active.load() ? DiagState::kActive : DiagState::kPaused;
+}
+
+template <class HintManagerT, class PowerSessionManagerT>
+void PowerHintSession<HintManagerT, PowerSessionManagerT>::diagUnclassified(uint64_t reportSeq,
+                                                                           size_t batchSize,
+                                                                           DiagReason reason) {
+    mDiag->appendUnclassified(mSessionId, mDiagGeneration, reportSeq, mDiagProcTagId,
+                              mDiagSessTagId, static_cast<uint32_t>(batchSize), reason,
+                              diagStateLocked());
 }
 
 template <class HintManagerT, class PowerSessionManagerT>
@@ -514,37 +521,28 @@ template <class HintManagerT, class PowerSessionManagerT>
 ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::reportActualWorkDuration(
         const std::vector<WorkDuration> &actualDurations) {
     std::scoped_lock lock{mPowerHintSessionLock};
-    // A report that never reaches a classification still identifies itself, so a
-    // reader can see why a report produced no decision record.
-    const auto diagRejected = [this, &actualDurations](DiagReason reason) {
-        mDiag->appendUnclassified(mSessionId, mDiagGeneration, mDiagReportSeq + 1, mDiagProcTagId,
-                                  mDiagSessTagId,
-                                  static_cast<uint32_t>(actualDurations.size()), reason,
-                                  diagStateLocked());
-    };
+    const uint64_t reportSeq = ++mDiagReportSeq;
+    const size_t batchSize = actualDurations.size();
     if (mSessionClosed) {
         ALOGE("Error: session is dead");
-        diagRejected(DiagReason::kClosed);
+        diagUnclassified(reportSeq, batchSize, DiagReason::kClosed);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
     if (mDescriptor->targetNs.count() == 0LL) {
         ALOGE("Expect to call updateTargetWorkDuration() first.");
-        diagRejected(DiagReason::kNoTarget);
+        diagUnclassified(reportSeq, batchSize, DiagReason::kNoTarget);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
     if (actualDurations.empty()) {
         ALOGE("Error: durations shouldn't be empty.");
-        diagRejected(DiagReason::kEmptyBatch);
+        diagUnclassified(reportSeq, batchSize, DiagReason::kEmptyBatch);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
     }
     if (!mDescriptor->is_active.load()) {
         ALOGE("Error: shouldn't report duration during pause state.");
-        diagRejected(DiagReason::kPaused);
+        diagUnclassified(reportSeq, batchSize, DiagReason::kPaused);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
-    // Only a report that reaches classification consumes a sequence number, so
-    // that within one report sequence the records form a contiguous item run.
-    const uint64_t reportSeq = ++mDiagReportSeq;
     auto adpfConfig = getAdpfProfile();
     mDescriptor->update_count++;
     bool isFirstFrame = isTimeout();
@@ -565,10 +563,7 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::reportA
     mPSManager->disableBoosts(mSessionId);
 
     if (!adpfConfig->mPidOn) {
-        mDiag->appendUnclassified(mSessionId, mDiagGeneration, reportSeq, mDiagProcTagId,
-                                  mDiagSessTagId,
-                                  static_cast<uint32_t>(actualDurations.size()),
-                                  DiagReason::kPidOff, diagStateLocked());
+        diagUnclassified(reportSeq, batchSize, DiagReason::kPidOff);
         updatePidControlVariable(adpfConfig->mUclampMinHigh);
         return ndk::ScopedAStatus::ok();
     }
@@ -579,11 +574,7 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::reportA
                              adpfConfig->mHeuristicRampup.value() && mProcTag != ProcessTag::CHROME;
 
     if (!hboostEnabled) {
-        // One record for the whole batch: the classification stage was skipped.
-        mDiag->appendUnclassified(mSessionId, mDiagGeneration, reportSeq, mDiagProcTagId,
-                                  mDiagSessTagId,
-                                  static_cast<uint32_t>(actualDurations.size()),
-                                  DiagReason::kHboostOff, diagStateLocked());
+        diagUnclassified(reportSeq, batchSize, DiagReason::kHboostOff);
     }
 
     if (hboostEnabled) {

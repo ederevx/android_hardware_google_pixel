@@ -173,8 +173,6 @@ std::string joinWindowId(uint64_t high, uint64_t low) {
     return StringPrintf("%016" PRIx64 "%016" PRIx64, high, low);
 }
 
-// A dumpsys reader that disappears during a long read must not kill the HAL
-// through SIGPIPE, so the signal is blocked for this thread around the writes.
 class SigpipeGuard {
   public:
     SigpipeGuard() {
@@ -448,12 +446,14 @@ void AdpfDiag::updateSfLocked(const AdpfDiagLifecycle &event, uint64_t seq) {
             }
             break;
         }
-        case DiagEvent::kClose:
-        case DiagEvent::kDestroy: {
+        case DiagEvent::kClose: {
             // A supersede needs a live session created after this one: an older
             // session closing is not evidence that anything took over.
             auto closing = mLiveSf.find(event.instanceId);
-            const uint64_t closingCreate = closing != mLiveSf.end() ? closing->second.createSeq : 0;
+            if (closing == mLiveSf.end()) {
+                break;
+            }
+            const uint64_t closingCreate = closing->second.createSeq;
             const SessionEntry *successor = nullptr;
             for (const auto &[instanceId, entry] : mLiveSf) {
                 if (instanceId == event.instanceId || entry.createSeq <= closingCreate) {

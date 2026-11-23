@@ -96,6 +96,8 @@ class PowerHintSession : public BnPowerHintSession, public Immobile {
     ndk::ScopedAStatus setModeLocked(SessionMode mode, bool enabled)
             REQUIRES(mPowerHintSessionLock);
     ndk::ScopedAStatus closeImpl(DiagOrigin origin) REQUIRES(mPowerHintSessionLock);
+    void diagUnclassified(uint64_t reportSeq, size_t batchSize, DiagReason reason)
+            REQUIRES(mPowerHintSessionLock);
     void diagLifecycle(DiagEvent event, DiagOrigin origin, DiagReason reason, DiagState previous,
                        DiagState next) REQUIRES(mPowerHintSessionLock);
     DiagState diagStateLocked() const REQUIRES(mPowerHintSessionLock);

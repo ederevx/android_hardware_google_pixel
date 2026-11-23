@@ -46,9 +46,6 @@ class SessionRecords {
     };
 
   public:
-    // The factor is captured at construction and never re-read, so a later
-    // profile change does not alter this session's jank threshold; the profile
-    // name it came from travels with it for the classification record.
     SessionRecords(const int32_t maxNumOfRecords, const double jankCheckTimeFactor,
                    std::string factorProfileName = {});
     ~SessionRecords() = default;

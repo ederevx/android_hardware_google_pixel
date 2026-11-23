@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <android-base/file.h>
 #include <gtest/gtest.h>
 
 #include <unistd.h>
@@ -37,37 +38,26 @@ namespace {
 
 const char kBootId[] = "11111111-2222-3333-4444-555555555555";
 
-// handleDumpCommand writes to a plain fd, so a temporary file doubles as the
-// dump sink without the deadlock a full pipe would cause.
 class DumpSink {
   public:
-    DumpSink() {
-        mFile = tmpfile();
-        EXPECT_NE(mFile, nullptr);
-    }
-    ~DumpSink() {
-        if (mFile != nullptr) {
-            fclose(mFile);
-        }
-    }
-    int fd() const { return fileno(mFile); }
+    int fd() const { return mFile.fd; }
 
     std::string take() {
-        EXPECT_EQ(fseeko(mFile, 0, SEEK_SET), 0);
+        EXPECT_EQ(lseek(mFile.fd, 0, SEEK_SET), 0);
         std::string out;
         char buffer[4096];
         while (true) {
-            size_t count = fread(buffer, 1, sizeof(buffer), mFile);
-            out.append(buffer, count);
-            if (count < sizeof(buffer)) {
+            ssize_t count = read(mFile.fd, buffer, sizeof(buffer));
+            if (count <= 0) {
                 break;
             }
+            out.append(buffer, count);
         }
         return out;
     }
 
   private:
-    FILE *mFile{nullptr};
+    TemporaryFile mFile;
 };
 
 size_t countOf(const std::string &text, const std::string &needle) {
@@ -106,17 +96,11 @@ std::string field(const std::string &json, const std::string &key) {
 class AdpfDiagTest : public ::testing::Test {
   protected:
     void SetUp() override {
-        char path[] = "/tmp/adpfdiag-bootid-XXXXXX";
-        int fd = mkstemp(path);
-        ASSERT_GE(fd, 0);
-        ASSERT_EQ(write(fd, kBootId, sizeof(kBootId) - 1), static_cast<ssize_t>(sizeof(kBootId) - 1));
-        close(fd);
-        mBootIdPath = path;
-        mSources.bootIdPath = mBootIdPath.c_str();
+        ASSERT_EQ(write(mBootId.fd, kBootId, sizeof(kBootId) - 1),
+                  static_cast<ssize_t>(sizeof(kBootId) - 1));
+        mSources.bootIdPath = mBootId.path;
         mSources.statPath = "/proc/self/stat";
     }
-
-    void TearDown() override { unlink(mBootIdPath.c_str()); }
 
     std::string command(AdpfDiag &diag, const std::vector<std::string> &args) {
         std::vector<const char *> raw;
@@ -160,7 +144,7 @@ class AdpfDiagTest : public ::testing::Test {
                             (targetNs / 1000) * factor, reportedNs / 1000 > (targetNs / 1000) * factor);
     }
 
-    std::string mBootIdPath;
+    TemporaryFile mBootId;
     AdpfDiag::Sources mSources;
 };
 
@@ -270,7 +254,6 @@ TEST_F(AdpfDiagTest, SessionRecordsEmitsOneDecisionPerItem) {
     EXPECT_EQ(countOf(dump, "\"kind\":\"decision\""), 3u);
     EXPECT_EQ(countOf(dump, "\"missed_actual\":true"), 1u);
     EXPECT_NE(dump.find("\"item_index\":2"), std::string::npos);
-    // The record names the profile whose factor the records were built with.
     EXPECT_NE(dump.find("\"factor_used\":1.2"), std::string::npos) << dump;
 }
 
@@ -398,6 +381,55 @@ TEST_F(AdpfDiagTest, OneAppendCostsMicroseconds) {
     // One classified item costs one fixed-size record under a leaf mutex; a
     // report path that took materially longer than this would show a defect.
     EXPECT_LT(perAppendUs, 5.0) << perAppendUs << " us per append";
+}
+
+TEST_F(AdpfDiagTest, DestroyAddsNoCompetitionRecordOfItsOwn) {
+    AdpfDiag diag(mSources);
+    const std::string windowId = "4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a";
+    begin(diag, windowId);
+
+    AdpfDiagLifecycle create;
+    create.event = DiagEvent::kCreate;
+    create.origin = DiagOrigin::kClient;
+    create.newState = DiagState::kActive;
+    create.isSurfaceFlinger = true;
+
+    create.instanceId = 41;
+    create.generation = 1;
+    diag.appendLifecycle(create);
+    create.instanceId = 42;
+    create.generation = 2;
+    diag.appendLifecycle(create);
+
+    // The newer session closes first: nothing superseded it, so its destroy
+    // must not invent a competition record for the session still running.
+    AdpfDiagLifecycle close = create;
+    close.event = DiagEvent::kClose;
+    close.instanceId = 42;
+    close.generation = 2;
+    close.previousState = DiagState::kActive;
+    close.newState = DiagState::kClosed;
+    diag.appendLifecycle(close);
+
+    AdpfDiagLifecycle destroy = close;
+    destroy.event = DiagEvent::kDestroy;
+    diag.appendLifecycle(destroy);
+    end(diag, windowId);
+    std::string dump = read(diag, windowId);
+    ASSERT_NE(dump.find("\"ok\":true"), std::string::npos) << dump;
+    EXPECT_EQ(countOf(dump, "\"kind\":\"sf_competition\""), 1u) << dump;
+
+    // The older session closes into a live one only once.
+    const std::string second = "4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b";
+    begin(diag, second);
+    close.instanceId = 41;
+    close.generation = 1;
+    diag.appendLifecycle(close);
+    diag.appendLifecycle(destroy);
+    end(diag, second);
+    dump = read(diag, second);
+    ASSERT_NE(dump.find("\"ok\":true"), std::string::npos) << dump;
+    EXPECT_EQ(countOf(dump, "\"kind\":\"sf_competition\""), 0u) << dump;
 }
 
 TEST_F(AdpfDiagTest, LifecycleRecordsCoverEveryTransition) {
