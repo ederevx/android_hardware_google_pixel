@@ -208,8 +208,6 @@ TEST_F(AdpfDiagTest, DecisionRecordsTheComparisonItWasGiven) {
     AdpfDiag diag(mSources);
     const std::string windowId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     begin(diag, windowId);
-    // Exactly at the threshold is not a miss; the comparison is strict and the
-    // operands are microsecond integers, so a sub-microsecond excess is not seen.
     decision(diag, 9'600'000, 8'000'000, 1.2, 0);
     decision(diag, 9'600'999, 8'000'000, 1.2, 1);
     decision(diag, 9'601'000, 8'000'000, 1.2, 2);
@@ -219,7 +217,6 @@ TEST_F(AdpfDiagTest, DecisionRecordsTheComparisonItWasGiven) {
     ASSERT_NE(dump.find("\"ok\":true"), std::string::npos) << dump;
     const size_t threshold = dump.find("\"effective_threshold_used\":");
     ASSERT_NE(threshold, std::string::npos);
-    // 9600 us exactly for the first two, 9601 us classifies as missed.
     EXPECT_NE(dump.find("\"effective_threshold_used\":9600"), std::string::npos) << dump;
     EXPECT_EQ(countOf(dump, "\"missed_actual\":true"), 1u);
     EXPECT_EQ(countOf(dump, "\"item_index\":0"), 1u);
@@ -401,8 +398,6 @@ TEST_F(AdpfDiagTest, DestroyAddsNoCompetitionRecordOfItsOwn) {
     create.generation = 2;
     diag.appendLifecycle(create);
 
-    // The newer session closes first: nothing superseded it, so its destroy
-    // must not invent a competition record for the session still running.
     AdpfDiagLifecycle close = create;
     close.event = DiagEvent::kClose;
     close.instanceId = 42;
@@ -419,17 +414,23 @@ TEST_F(AdpfDiagTest, DestroyAddsNoCompetitionRecordOfItsOwn) {
     ASSERT_NE(dump.find("\"ok\":true"), std::string::npos) << dump;
     EXPECT_EQ(countOf(dump, "\"kind\":\"sf_competition\""), 1u) << dump;
 
-    // The older session closes into a live one only once.
     const std::string second = "4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b";
     begin(diag, second);
+    create.instanceId = 43;
+    create.generation = 3;
+    diag.appendLifecycle(create);
     close.instanceId = 41;
     close.generation = 1;
     diag.appendLifecycle(close);
+    destroy.instanceId = 41;
+    destroy.generation = 1;
     diag.appendLifecycle(destroy);
     end(diag, second);
     dump = read(diag, second);
     ASSERT_NE(dump.find("\"ok\":true"), std::string::npos) << dump;
-    EXPECT_EQ(countOf(dump, "\"kind\":\"sf_competition\""), 0u) << dump;
+    EXPECT_EQ(countOf(dump, "\"kind\":\"sf_competition\""), 2u) << dump;
+    EXPECT_EQ(countOf(dump, "\"event\":\"SF_SUPERSEDED\""), 1u) << dump;
+    EXPECT_NE(dump.find("\"other_instance_id\":43"), std::string::npos) << dump;
 }
 
 TEST_F(AdpfDiagTest, LifecycleRecordsCoverEveryTransition) {
