@@ -23,6 +23,7 @@
 #include <mutex>
 #include <optional>
 
+#include "AdpfDiag.h"
 #include "AppHintDesc.h"
 #include "BackgroundWorker.h"
 #include "GpuCapacityNode.h"
@@ -90,6 +91,10 @@ class PowerSessionManager : public Immobile {
 
     std::optional<Frequency> gpuFrequency() const;
 
+    // The ADPF classification diagnostic ring lives with the session manager so
+    // the dump handler and every session reach the same instance.
+    AdpfDiag &adpfDiag() { return mAdpfDiag; }
+
     void registerSession(std::shared_ptr<void> session, int64_t sessionId);
     void unregisterSession(int64_t sessionId);
     // Only for testing
@@ -153,6 +158,7 @@ class PowerSessionManager : public Immobile {
 
     std::vector<SessionMetrics> mCollectedSessionMetrics GUARDED_BY(mSessionTaskMapMutex);
     const int32_t kMaxNumOfCachedSessionMetrics;
+    AdpfDiag mAdpfDiag;
 };
 
 }  // namespace pixel

@@ -24,6 +24,7 @@
 #include <array>
 #include <unordered_map>
 
+#include "AdpfDiag.h"
 #include "AdpfTypes.h"
 #include "AppDescriptorTrace.h"
 #include "PowerSessionManager.h"
@@ -94,9 +95,15 @@ class PowerHintSession : public BnPowerHintSession, public Immobile {
     const std::shared_ptr<AdpfConfig> getAdpfProfile() const;
     ndk::ScopedAStatus setModeLocked(SessionMode mode, bool enabled)
             REQUIRES(mPowerHintSessionLock);
+    ndk::ScopedAStatus closeImpl(DiagOrigin origin) REQUIRES(mPowerHintSessionLock);
+    void diagLifecycle(DiagEvent event, DiagOrigin origin, DiagReason reason, DiagState previous,
+                       DiagState next) REQUIRES(mPowerHintSessionLock);
+    DiagState diagStateLocked() const REQUIRES(mPowerHintSessionLock);
 
     // Data
     PowerSessionManagerT *mPSManager;
+    // ADPF classification diagnostics, shared with the dump handler
+    AdpfDiag *const mDiag;
     const int64_t mSessionId = 0;
     // Tag labeling what kind of session this is
     const SessionTag mSessTag;
@@ -117,6 +124,12 @@ class PowerHintSession : public BnPowerHintSession, public Immobile {
     const bool mEnableMetricCollection;
     std::function<void(const std::shared_ptr<AdpfConfig>)> mOnAdpfUpdate;
     std::unique_ptr<SessionRecords> mSessionRecords GUARDED_BY(mPowerHintSessionLock) = nullptr;
+    uint32_t mDiagGeneration GUARDED_BY(mPowerHintSessionLock){1};
+    uint64_t mDiagReportSeq GUARDED_BY(mPowerHintSessionLock){0};
+    uint16_t mDiagProcTagId GUARDED_BY(mPowerHintSessionLock){AdpfDiag::kNoId};
+    uint16_t mDiagSessTagId GUARDED_BY(mPowerHintSessionLock){AdpfDiag::kNoId};
+    uint16_t mDiagFactorProfileId GUARDED_BY(mPowerHintSessionLock){AdpfDiag::kNoId};
+    uint16_t mDiagCurrentProfileId GUARDED_BY(mPowerHintSessionLock){AdpfDiag::kNoId};
     bool mHeuristicBoostActive GUARDED_BY(mPowerHintSessionLock){false};
     SessionJankyLevel mJankyLevel GUARDED_BY(mPowerHintSessionLock){SessionJankyLevel::LIGHT};
     uint32_t mJankyFrameNum GUARDED_BY(mPowerHintSessionLock){0};

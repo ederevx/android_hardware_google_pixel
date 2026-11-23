@@ -150,6 +150,7 @@ PowerHintSession<HintManagerT, PowerSessionManagerT>::PowerHintSession(
         int32_t tgid, int32_t uid, const std::vector<int32_t> &threadIds, int64_t durationNs,
         SessionTag tag)
     : mPSManager(PowerSessionManagerT::getInstance()),
+      mDiag(&mPSManager->adpfDiag()),
       mSessionId(++sSessionIDCounter),
       mSessTag(tag),
       mProcTag(TgidTypeChecker::getInstance()->isValid()
@@ -172,11 +173,24 @@ PowerHintSession<HintManagerT, PowerSessionManagerT>::PowerHintSession(
                                       getAdpfProfile()->mHeuristicBoostOn.value()
                               ? std::make_unique<SessionRecords>(
                                         getAdpfProfile()->mMaxRecordsNum.value(),
-                                        getAdpfProfile()->mJankCheckTimeFactor.value())
+                                        getAdpfProfile()->mJankCheckTimeFactor.value(),
+                                        getAdpfProfile()->mName)
                               : nullptr) {
     ATRACE_CALL();
     ATRACE_INT(mAppDescriptorTrace->trace_target.c_str(), mDescriptor->targetNs.count());
     ATRACE_INT(mAppDescriptorTrace->trace_active.c_str(), mDescriptor->is_active.load());
+
+    {
+        std::scoped_lock lock{mPowerHintSessionLock};
+        mDiagProcTagId = mDiag->internName(toString(mProcTag));
+        mDiagSessTagId = mDiag->internName(toString(mSessTag));
+        mDiagCurrentProfileId = mDiag->internName(getAdpfProfile()->mName);
+        if (mSessionRecords != nullptr) {
+            mDiagFactorProfileId = mDiag->internName(mSessionRecords->getFactorProfileName());
+        }
+        diagLifecycle(DiagEvent::kCreate, DiagOrigin::kClient, DiagReason::kNone, DiagState::kNone,
+                      diagStateLocked());
+    }
 
     if (mProcTag != ProcessTag::DEFAULT) {
         HintManager::GetInstance()->RegisterAdpfUpdateEvent(toString(mProcTag), &mOnAdpfUpdate);
@@ -202,7 +216,12 @@ PowerHintSession<HintManagerT, PowerSessionManagerT>::PowerHintSession(
 template <class HintManagerT, class PowerSessionManagerT>
 PowerHintSession<HintManagerT, PowerSessionManagerT>::~PowerHintSession() {
     ATRACE_CALL();
-    close();
+    {
+        std::scoped_lock lock{mPowerHintSessionLock};
+        closeImpl(DiagOrigin::kDestructor);
+        diagLifecycle(DiagEvent::kDestroy, DiagOrigin::kDestructor, DiagReason::kNone,
+                      DiagState::kClosed, DiagState::kDestroyed);
+    }
     ALOGV("PowerHintSession deleted: %s", mDescriptor->toString().c_str());
     ATRACE_INT(mAppDescriptorTrace->trace_target.c_str(), 0);
     ATRACE_INT(mAppDescriptorTrace->trace_actl_last.c_str(), 0);
@@ -265,12 +284,19 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::pause()
     std::scoped_lock lock{mPowerHintSessionLock};
     if (mSessionClosed) {
         ALOGE("Error: session is dead");
+        diagLifecycle(DiagEvent::kRejected, DiagOrigin::kClient, DiagReason::kClosed,
+                      DiagState::kClosed, DiagState::kClosed);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
-    if (!mDescriptor->is_active.load())
+    if (!mDescriptor->is_active.load()) {
+        diagLifecycle(DiagEvent::kRejected, DiagOrigin::kClient, DiagReason::kNotActive,
+                      DiagState::kPaused, DiagState::kPaused);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
+    }
     // Reset to default uclamp value.
     mDescriptor->is_active.store(false);
+    diagLifecycle(DiagEvent::kPause, DiagOrigin::kClient, DiagReason::kNone, DiagState::kActive,
+                  DiagState::kPaused);
     mPSManager->pause(mSessionId);
     mPSManager->setThreadsFromPowerSession(mSessionId, {});
     ATRACE_INT(mAppDescriptorTrace->trace_active.c_str(), false);
@@ -283,13 +309,22 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::resume(
     std::scoped_lock lock{mPowerHintSessionLock};
     if (mSessionClosed) {
         ALOGE("Error: session is dead");
+        diagLifecycle(DiagEvent::kRejected, DiagOrigin::kClient, DiagReason::kClosed,
+                      DiagState::kClosed, DiagState::kClosed);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
     if (mDescriptor->is_active.load()) {
+        diagLifecycle(DiagEvent::kRejected, DiagOrigin::kClient, DiagReason::kAlreadyActive,
+                      DiagState::kActive, DiagState::kActive);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
     mPSManager->setThreadsFromPowerSession(mSessionId, mDescriptor->thread_ids);
     mDescriptor->is_active.store(true);
+    // A resumed session runs under a new generation, so pre-pause and post-resume
+    // reports are not mistaken for one continuous report sequence.
+    ++mDiagGeneration;
+    diagLifecycle(DiagEvent::kResume, DiagOrigin::kClient, DiagReason::kNone, DiagState::kPaused,
+                  DiagState::kActive);
     // resume boost
     mPSManager->resume(mSessionId);
     ATRACE_INT(mAppDescriptorTrace->trace_active.c_str(), true);
@@ -300,9 +335,20 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::resume(
 template <class HintManagerT, class PowerSessionManagerT>
 ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::close() {
     std::scoped_lock lock{mPowerHintSessionLock};
+    return closeImpl(DiagOrigin::kClient);
+}
+
+template <class HintManagerT, class PowerSessionManagerT>
+ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::closeImpl(
+        DiagOrigin origin) {
     if (mSessionClosed) {
+        if (origin == DiagOrigin::kClient) {
+            diagLifecycle(DiagEvent::kRejected, origin, DiagReason::kClosed, DiagState::kClosed,
+                          DiagState::kClosed);
+        }
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
+    const bool wasActive = mDescriptor->is_active.load();
     mSessionClosed = true;
     // Remove the session from PowerSessionManager first to avoid racing.
     mPSManager->removePowerSession(mSessionId);
@@ -314,7 +360,49 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::close()
         HintManager::GetInstance()->UnregisterAdpfUpdateEvent(toString(mSessTag), &mOnAdpfUpdate);
     }
     ATRACE_INT(mAppDescriptorTrace->trace_min.c_str(), 0);
+    diagLifecycle(DiagEvent::kClose, origin, DiagReason::kNone,
+                  wasActive ? DiagState::kActive : DiagState::kPaused, DiagState::kClosed);
     return ndk::ScopedAStatus::ok();
+}
+
+template <class HintManagerT, class PowerSessionManagerT>
+DiagState PowerHintSession<HintManagerT, PowerSessionManagerT>::diagStateLocked() const {
+    if (mSessionClosed) {
+        return DiagState::kClosed;
+    }
+    return mDescriptor->is_active.load() ? DiagState::kActive : DiagState::kPaused;
+}
+
+template <class HintManagerT, class PowerSessionManagerT>
+void PowerHintSession<HintManagerT, PowerSessionManagerT>::diagLifecycle(DiagEvent event,
+                                                                        DiagOrigin origin,
+                                                                        DiagReason reason,
+                                                                        DiagState previous,
+                                                                        DiagState next) {
+    AdpfDiagLifecycle lifecycle;
+    lifecycle.event = event;
+    lifecycle.origin = origin;
+    lifecycle.reason = reason;
+    lifecycle.instanceId = mSessionId;
+    lifecycle.generation = mDiagGeneration;
+    lifecycle.lastReportSeq = mDiagReportSeq;
+    lifecycle.previousState = previous;
+    lifecycle.newState = next;
+    lifecycle.procTagId = mDiagProcTagId;
+    lifecycle.sessTagId = mDiagSessTagId;
+    lifecycle.profileId = mDiagFactorProfileId;
+    lifecycle.currentProfileId = mDiagCurrentProfileId;
+    lifecycle.isSurfaceFlinger = mSessTag == SessionTag::SURFACEFLINGER;
+    lifecycle.hasFactor = mSessionRecords != nullptr;
+    lifecycle.factor = lifecycle.hasFactor ? mSessionRecords->getJankCheckTimeFactor() : 0.0;
+    if (event == DiagEvent::kProfileSwap) {
+        // A swap changes the factor a session created from now on would capture;
+        // the factor this session still classifies with does not move.
+        const auto &newFactor = getAdpfProfile()->mJankCheckTimeFactor;
+        lifecycle.newHasFactor = newFactor.has_value();
+        lifecycle.newProfileFactor = newFactor.value_or(0.0);
+    }
+    mDiag->appendLifecycle(lifecycle);
 }
 
 template <class HintManagerT, class PowerSessionManagerT>
@@ -426,22 +514,37 @@ template <class HintManagerT, class PowerSessionManagerT>
 ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::reportActualWorkDuration(
         const std::vector<WorkDuration> &actualDurations) {
     std::scoped_lock lock{mPowerHintSessionLock};
+    // A report that never reaches a classification still identifies itself, so a
+    // reader can see why a report produced no decision record.
+    const auto diagRejected = [this, &actualDurations](DiagReason reason) {
+        mDiag->appendUnclassified(mSessionId, mDiagGeneration, mDiagReportSeq + 1, mDiagProcTagId,
+                                  mDiagSessTagId,
+                                  static_cast<uint32_t>(actualDurations.size()), reason,
+                                  diagStateLocked());
+    };
     if (mSessionClosed) {
         ALOGE("Error: session is dead");
+        diagRejected(DiagReason::kClosed);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
     if (mDescriptor->targetNs.count() == 0LL) {
         ALOGE("Expect to call updateTargetWorkDuration() first.");
+        diagRejected(DiagReason::kNoTarget);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
     if (actualDurations.empty()) {
         ALOGE("Error: durations shouldn't be empty.");
+        diagRejected(DiagReason::kEmptyBatch);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
     }
     if (!mDescriptor->is_active.load()) {
         ALOGE("Error: shouldn't report duration during pause state.");
+        diagRejected(DiagReason::kPaused);
         return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
     }
+    // Only a report that reaches classification consumes a sequence number, so
+    // that within one report sequence the records form a contiguous item run.
+    const uint64_t reportSeq = ++mDiagReportSeq;
     auto adpfConfig = getAdpfProfile();
     mDescriptor->update_count++;
     bool isFirstFrame = isTimeout();
@@ -462,6 +565,10 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::reportA
     mPSManager->disableBoosts(mSessionId);
 
     if (!adpfConfig->mPidOn) {
+        mDiag->appendUnclassified(mSessionId, mDiagGeneration, reportSeq, mDiagProcTagId,
+                                  mDiagSessTagId,
+                                  static_cast<uint32_t>(actualDurations.size()),
+                                  DiagReason::kPidOff, diagStateLocked());
         updatePidControlVariable(adpfConfig->mUclampMinHigh);
         return ndk::ScopedAStatus::ok();
     }
@@ -471,11 +578,29 @@ ndk::ScopedAStatus PowerHintSession<HintManagerT, PowerSessionManagerT>::reportA
     bool heurRampupEnabled = adpfConfig->mHeuristicRampup.has_value() &&
                              adpfConfig->mHeuristicRampup.value() && mProcTag != ProcessTag::CHROME;
 
+    if (!hboostEnabled) {
+        // One record for the whole batch: the classification stage was skipped.
+        mDiag->appendUnclassified(mSessionId, mDiagGeneration, reportSeq, mDiagProcTagId,
+                                  mDiagSessTagId,
+                                  static_cast<uint32_t>(actualDurations.size()),
+                                  DiagReason::kHboostOff, diagStateLocked());
+    }
+
     if (hboostEnabled) {
         FrameTimingMetrics newFrameMetrics;
+        AdpfDiagDecisionContext diagContext;
+        diagContext.sink = mDiag;
+        diagContext.instanceId = mSessionId;
+        diagContext.generation = mDiagGeneration;
+        diagContext.reportSeq = reportSeq;
+        diagContext.procTagId = mDiagProcTagId;
+        diagContext.sessTagId = mDiagSessTagId;
+        diagContext.profileId = mDiagFactorProfileId;
+        diagContext.state = diagStateLocked();
         mSessionRecords->addReportedDurations(
                 actualDurations, mDescriptor->targetNs.count(), newFrameMetrics,
-                mSessTag == SessionTag::SURFACEFLINGER && mPSManager->getGameModeEnableState());
+                mSessTag == SessionTag::SURFACEFLINGER && mPSManager->getGameModeEnableState(),
+                &diagContext);
         mPSManager->updateHboostStatistics(mSessionId, mJankyLevel, actualDurations.size());
         mPSManager->updateFrameMetrics(mSessionId, newFrameMetrics);
         mPSManager->updateCollectedSessionMetrics(mSessionId);
@@ -723,7 +848,13 @@ void PowerHintSession<HintManagerT, PowerSessionManagerT>::setAdpfProfile(
         const std::shared_ptr<AdpfConfig> profile) {
     // Must prevent profile from being changed in a binder call duration.
     std::scoped_lock lock{mPowerHintSessionLock};
+    if (profile.get() == mAdpfProfile.get()) {
+        return;
+    }
     mAdpfProfile = profile;
+    mDiagCurrentProfileId = mDiag->internName(getAdpfProfile()->mName);
+    diagLifecycle(DiagEvent::kProfileSwap, DiagOrigin::kProfileCallback, DiagReason::kNone,
+                  diagStateLocked(), diagStateLocked());
 }
 
 std::string AppHintDesc::toString() const {

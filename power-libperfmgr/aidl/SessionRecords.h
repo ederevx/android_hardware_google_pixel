@@ -20,6 +20,7 @@
 
 #include <deque>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "SessionMetrics.h"
@@ -32,6 +33,9 @@ namespace impl {
 namespace pixel {
 
 using aidl::android::hardware::power::WorkDuration;
+
+struct AdpfDiagDecisionContext;
+
 class SessionRecords {
   public:
     struct CycleRecord {
@@ -42,12 +46,17 @@ class SessionRecords {
     };
 
   public:
-    SessionRecords(const int32_t maxNumOfRecords, const double jankCheckTimeFactor);
+    // The factor is captured at construction and never re-read, so a later
+    // profile change does not alter this session's jank threshold; the profile
+    // name it came from travels with it for the classification record.
+    SessionRecords(const int32_t maxNumOfRecords, const double jankCheckTimeFactor,
+                   std::string factorProfileName = {});
     ~SessionRecords() = default;
 
     void addReportedDurations(const std::vector<WorkDuration> &actualDurationsNs,
                               int64_t targetDurationNs, FrameTimingMetrics &newFrameMetrics,
-                              bool computeGameMetrics = false);
+                              bool computeGameMetrics = false,
+                              const AdpfDiagDecisionContext *diagContext = nullptr);
     std::optional<int32_t> getMaxDuration();
     std::optional<int32_t> getAvgDuration();
     int32_t getNumOfRecords();
@@ -59,6 +68,8 @@ class SessionRecords {
     int32_t getLatestFPS() const;
     int32_t getNumOfFPSJitters() const;
     bool areAllRecordsInitialized() const;
+    double getJankCheckTimeFactor() const;
+    const std::string &getFactorProfileName() const;
 
   private:
     void updateFrameBuckets(int32_t frameDurationUs, bool isJankFrame,
@@ -67,6 +78,7 @@ class SessionRecords {
 
     const int32_t kMaxNumOfRecords;
     const double kJankCheckTimeFactor;
+    const std::string kFactorProfileName;
     std::vector<CycleRecord> mRecords;
     // A descending order queue to store the records' indexes.
     // It is for detecting the maximum duration.

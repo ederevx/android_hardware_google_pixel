@@ -20,6 +20,8 @@
 
 #include <android-base/logging.h>
 
+#include "AdpfDiag.h"
+
 namespace aidl {
 namespace google {
 namespace hardware {
@@ -29,15 +31,20 @@ namespace pixel {
 
 static constexpr int32_t kTotalFramesForFPSCheck = 3;
 
-SessionRecords::SessionRecords(const int32_t maxNumOfRecords, const double jankCheckTimeFactor)
-    : kMaxNumOfRecords(maxNumOfRecords), kJankCheckTimeFactor(jankCheckTimeFactor) {
+SessionRecords::SessionRecords(const int32_t maxNumOfRecords, const double jankCheckTimeFactor,
+                               std::string factorProfileName)
+    : kMaxNumOfRecords(maxNumOfRecords),
+      kJankCheckTimeFactor(jankCheckTimeFactor),
+      kFactorProfileName(std::move(factorProfileName)) {
     mRecords.resize(maxNumOfRecords);
 }
 
 void SessionRecords::addReportedDurations(const std::vector<WorkDuration> &actualDurationsNs,
                                           int64_t targetDurationNs,
                                           FrameTimingMetrics &newFrameMetrics,
-                                          bool computeGameMetrics) {
+                                          bool computeGameMetrics,
+                                          const AdpfDiagDecisionContext *diagContext) {
+    uint32_t itemIndex = 0;
     for (auto &duration : actualDurationsNs) {
         int32_t totalDurationUs = duration.durationNanos / 1000;
 
@@ -105,7 +112,15 @@ void SessionRecords::addReportedDurations(const std::vector<WorkDuration> &actua
             mAddedFramesForFPSCheck = 0;
         }
 
-        bool cycleMissed = totalDurationUs > (targetDurationNs / 1000) * kJankCheckTimeFactor;
+        // The comparison and the classification record it feeds share these two
+        // locals, so the record cannot disagree with the decision.
+        const double effectiveThresholdUs = (targetDurationNs / 1000) * kJankCheckTimeFactor;
+        bool cycleMissed = totalDurationUs > effectiveThresholdUs;
+        if (diagContext != nullptr) {
+            diagContext->sink->appendDecision(*diagContext, itemIndex, duration.durationNanos,
+                                              targetDurationNs, kJankCheckTimeFactor,
+                                              effectiveThresholdUs, cycleMissed);
+        }
         mRecords[mLatestRecordIndex] =
                 CycleRecord{startIntervalUs, totalDurationUs, cycleMissed, FPSJitter};
         mNumOfFrames++;
@@ -131,6 +146,7 @@ void SessionRecords::addReportedDurations(const std::vector<WorkDuration> &actua
 
         mSumOfDurationsUs += totalDurationUs;
         mAvgDurationUs = mSumOfDurationsUs / mNumOfFrames;
+        ++itemIndex;
     }
 }
 
@@ -227,6 +243,14 @@ void SessionRecords::updateGameMetrics(int32_t frameIntervalUs, GameFrameMetrics
 
 bool SessionRecords::areAllRecordsInitialized() const {
     return mNumOfFrames >= kMaxNumOfRecords;
+}
+
+double SessionRecords::getJankCheckTimeFactor() const {
+    return kJankCheckTimeFactor;
+}
+
+const std::string &SessionRecords::getFactorProfileName() const {
+    return kFactorProfileName;
 }
 
 }  // namespace pixel

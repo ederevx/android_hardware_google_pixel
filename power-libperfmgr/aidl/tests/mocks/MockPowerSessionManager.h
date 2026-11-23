@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <aidl/AdpfDiag.h>
 #include <aidl/AdpfTypes.h>
 #include <aidl/AppDescriptorTrace.h>
 #include <aidl/AppHintDesc.h>
@@ -85,6 +86,11 @@ class MockPowerSessionManager {
     static testing::NiceMock<MockPowerSessionManager> *getInstance() {
         static testing::NiceMock<MockPowerSessionManager> instance{};
         return &instance;
+    }
+
+    impl::pixel::AdpfDiag &adpfDiag() {
+        static impl::pixel::AdpfDiag adpfDiagInstance{};
+        return adpfDiagInstance;
     }
 };
 
